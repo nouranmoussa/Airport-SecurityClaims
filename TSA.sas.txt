@@ -1,0 +1,155 @@
+/*Importing data 
+out: specify dataset that will be created to hold the imported data. 
+dbms: specifies the type of the external file to be imported. 
+replace: if a dataset with the same name already exists, it should be replaced with the new dataset*/ 
+libname tsa "/home/u"; 
+options validvarname=v7; 
+proc import datafile="/home/u/EPG1V2/data/TSAClaims2002_2017.csv"  
+		out=tsa.ClaimsImport dbms=csv replace; 
+	guessingrows=max; 
+run; 
+ 
+ 
+/*previewing the first 100 observation 
+varnum: list all the variables in the dataset, along with their variable numbers, data types, lengths, and other attributes.*/ 
+proc print data=tsa.ClaimsImport (obs=100); 
+run; 
+proc contents data=tsa.ClaimsImport varnum; 
+run; 
+ 
+ 
+/*genetare frequency tables 
+nocum/nopercent: used to suppress the cumulative and percentage tables that are produced by default. 
+format year4. specifies the format of the "Date_Received" and "Incident_Date" variables to display only the year part.*/ 
+proc freq data=tsa.Claims_NoDups; 
+	tables Claim_Site Disposition Claim_Type / nocum nopercent; 
+	tables Date_Received Incident_Date / nocum nopercent; 
+	format Date_Received Incident_Date year4.; 
+run; 
+ 
+ 
+/*create sorted output dataset 
+nodupkey: remove duplicate observations based on all variables in the dataset.*/ 
+proc sort data=tsa.ClaimsImport out=tsa.Claims_NoDups nodupkey; 
+	by _all_; 
+run; 
+ 
+ 
+/*Data cleaning of columns*/ 
+data tsa.Claims_NoDups; 
+	set tsa.Claims_NoDups; 
+	/*Clean the Claim_Site column.*/ 
+	if missing(Claim_Site) or Claim_Site="-" then 
+		Claim_Site="Unknown"; 
+ 
+	/*Clean the Disposition column.*/ 
+	if missing(Disposition) or Disposition="-" then 
+		Disposition="Unknown"; 
+	else if Disposition='Closed: Canceled' then 
+		Disposition='Closed:Canceled'; 
+	else if Disposition='losed: Contractor Claim' then 
+		Disposition='Closed:Contractor Claim'; 
+ 
+	/*Clean the Claim_Type column.*/ 
+	if missing(Claim_Type) or Claim_Type="-" then 
+		Claim_Type="Unknown"; 
+	else if Claim_Type='Passenger Property Loss/Personal Injur' then 
+		Claim_Type='Passenger Property Loss'; 
+	else if Claim_Type='Passenger Property Loss/Personal Injury' then 
+		Claim_Type='Passenger Property Loss'; 
+	else if Claim_Type='Property Damage/Personal Injury' then 
+		Claim_Type='Property Damage'; 
+run; 
+ 
+ 
+/*Convert all State values to uppercase and all StateName values to proper case. 
+drops the "County" and "City" variables from the dataset.*/ 
+data tsa.Claims_NoDups; 
+	set tsa.Claims_NoDups; 
+	StateName=propcase(StateName); 
+	State=upcase(State); 
+	drop County City; 
+run; 
+ 
+ 
+/*adding a new variable named "Date_Issues" and assigns the value "Needs Review" to it, based on certain conditions 
+"Incident_Date" is greater than "Date_Received" 
+"Incident_Date" or "Date_Received" is missing (".") 
+"Incident_Date" or "Date_Received" is outside the range of 2002 to 2017.*/ 
+data tsa.Claims_NoDups; 
+	set tsa.Claims_NoDups; 
+	if (Incident_Date > Date_Received or Incident_Date=. or Date_Received=. or  
+		year(Incident_Date) < 2002 or year(Incident_Date) > 2017 or  
+		year(Date_Received) < 2002 or year(Date_Received) > 2017) then 
+			Date_Issues="Needs Review"; 
+run; 
+ 
+ 
+/*Sort the data by ascending Incident_Date*/ 
+proc sort data=tsa.Claims_NoDups; 
+	by Incident_Date; 
+run; 
+ 
+ 
+/*Some formatting: 
+Incident_Date & Date_Received: ddMMMyyyy. 
+Close_Amount: values with a dollar sign, commas for thousands separators, and two decimal places. 
+Removing "_" from the names of other variables.*/ 
+data tsa.Claims_NoDups; 
+	set tsa.Claims_NoDups; 
+	format Incident_Date Date_Received date9. Close_Amount Dollar20.2; 
+	label Airport_Code="Airport Code" Airport_Name="Airport Name"  
+		Claim_Number="Claim Number" Claim_Site="Claim Site" Claim_Type="Claim Type"  
+		Close_Amount="Close Amount" Date_Issues="Date Issues"  
+		Date_Received="Date Received" Incident_Date="Incident Date"  
+		Item_Category="Item Category"; 
+run; 
+ 
+ 
+/*creating a pdf file containg statistics 
+PDFTOC: PDF contains table of content 
+PROCLABEL:sets the title of the report to "TSAreport" 
+title: sets the main title in the first page*/ 
+%let outpath= /home/u; /*macro variable (stores refrence)*/ 
+ODS PDF FILE="&outpath/ClaimsReports.pdf" STYLE=Meadow STARTPAGE=NO PDFTOC=1; 
+ODS PROCLABEL"TSAreport"; 
+title "Overall Date Issues in the Data/ Data Statistics"; 
+ 
+proc freq data=tsa.Claims_NoDups; 
+	table Date_Issues / nocum nopercent; 
+run; 
+ 
+title; 
+ods graphics on; /*enables the creation of graphical output in the report.*/ 
+title "Overall Claims by Year"; 
+ 
+proc freq data=tsa.Claims_NoDups; 
+	table Incident_Date / nocum nopercent plots=freqplot; 
+	format Incident_Date year4.; 
+	where Date_Issues is null; 
+run; 
+ 
+title; 
+/*generating statistics of California state*/ 
+%let StateName=California; 
+title "&StateName Claim Types, Claim Sites and Disposition Frequencies"; 
+ 
+/*order=freq: variables should be ordered by frequency. 
+"where" statement specifies that only observations where 
+"StateName" is "California" and "Date_Issues" is null should be included in the analysis.*/ 
+proc freq data=tsa.Claims_NoDups order=freq; 
+	table Claim_Type Claim_Site Disposition / nocum nopercent; 
+	where StateName="&StateName" and Date_Issues is null; 
+run; 
+ 
+title "Close_Amount Statistics for &StateName"; 
+ 
+/*calculate basic statistics for Close_Amount (mean, min, max, sum) 
+maxdec = 0: no decimal places*/ 
+proc means data=tsa.Claims_NoDups mean min max sum maxdec=0; 
+	var Close_Amount; 
+	where StateName="&StateName" and Date_Issues is null; 
+run; 
+ 
+title; 
+ODS PDF CLOSE; 
